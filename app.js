@@ -1427,10 +1427,9 @@ async function pullChunks() {
   return out;
 }
 async function putChunk(id, obj) {
-  await fsFetch(`${chunksUrl()}/${encodeURIComponent(id)}`, {
-    method: 'PATCH',
-    body: JSON.stringify({ fields: { json: { stringValue: JSON.stringify(obj) }, updatedAt: { integerValue: String(Date.now()) } } }),
-  });
+  const body = JSON.stringify({ fields: { json: { stringValue: JSON.stringify(obj) }, updatedAt: { integerValue: String(Date.now()) } } });
+  // keepalive lets the upload finish even if the app is closed straight after logging something
+  await fsFetch(`${chunksUrl()}/${encodeURIComponent(id)}`, { method: 'PATCH', body, keepalive: body.length < 60000 });
 }
 // Split the data into small documents so no single one grows past Firestore's 1 MB limit.
 function toChunks(d) {
@@ -1472,7 +1471,7 @@ const hashOf = (str) => { let h1 = 5381; for (let i = 0; i < str.length; i++) h1
 function scheduleSync() {
   if (!cloud.auth || !cloudReady()) return;
   clearTimeout(cloud.timer);
-  cloud.timer = setTimeout(() => syncNow({ pushOnly: true }), 3000);
+  cloud.timer = setTimeout(() => syncNow({ pushOnly: true }), 1500);
 }
 async function syncNow(opts = {}) {
   if (!cloud.auth || !cloudReady() || !navigator.onLine) return;
@@ -1498,6 +1497,7 @@ async function syncNow(opts = {}) {
       if (st.hashes[id] === hsh) continue;
       await putChunk(id, obj);
       st.hashes[id] = hsh;
+      writeSyncState(st);
       pushed++;
     }
     st.lastSync = new Date().toISOString();
@@ -1524,16 +1524,23 @@ function cloudCard() {
       h('button', { class: 'btn danger block', onclick: () => { if (confirm('Sign out? Your data stays on this phone and in the cloud.')) { signOut(); sheetState && sheetState.rerender(); render(); } } }, 'Sign out'));
   }
   const f = cloudCard.form || (cloudCard.form = { email: '', password: '' });
-  const go2 = (create) => async () => {
+  const go2 = (create) => async (ev) => {
     const email = f.email.trim();
     if (!email || !f.password) { toast('Enter your email and a password.'); return; }
+    if (f.busy) return;
+    f.busy = true;
+    const btn = ev && ev.currentTarget;
+    if (btn) { btn.disabled = true; btn.textContent = create ? 'Creating…' : 'Signing in…'; }
     try {
       await signIn(email, f.password, create);
       f.password = '';
       toast(create ? 'Cloud backup is on ☁️' : 'Signed in. Your data is synced ☁️');
       render();
       if (cloudCard.onDone) { const done = cloudCard.onDone; cloudCard.onDone = null; done(); } else if (sheetState) sheetState.rerender();
-    } catch (e) { toast(e.message, 4000); }
+    } catch (e) {
+      toast(e.message, 4000);
+      if (btn) { btn.disabled = false; btn.textContent = create ? 'Create account' : 'Sign in'; }
+    } finally { f.busy = false; }
   };
   return h('div', { class: 'card stack' },
     h('h2', null, '☁️ Cloud backup'),
@@ -1566,7 +1573,10 @@ function boot() {
   $('#settingsBtn').addEventListener('click', openSettings);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetState) closeSheet(); });
   // Re-render when the app comes back to the foreground so "today" rolls over at midnight.
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (!sheetState) render(); syncNow(); } });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') { if (!sheetState) render(); syncNow(); }
+    else { clearTimeout(cloud.timer); syncNow({ pushOnly: true }); } // leaving the app: upload now
+  });
   window.addEventListener('online', () => syncNow());
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.error);
