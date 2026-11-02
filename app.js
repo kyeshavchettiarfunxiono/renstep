@@ -69,7 +69,8 @@ function defaultState() {
   return {
     version: 1,
     createdAt: new Date().toISOString(),
-    settings: { goalMode: 'auto', manualGoal: 8000, restSec: 90 },
+    settings: { goalMode: 'auto', manualGoal: 8000, restSec: 90, name: '' },
+    askedName: false,
     steps: {},
     routines: [],
     sessions: [],
@@ -118,6 +119,7 @@ function normActive(a) {
     exercises: a.exercises.slice(0, 30).map((e, i) => ({
       name: str(e && e.name, 60, `Exercise ${i + 1}`),
       order: i,
+      inc: clampNum(e && e.inc, 0, 50, 2.5),
       target: {
         weight: clampNum(e && e.target && e.target.weight, 0, 1000, 0),
         reps: clampInt(e && e.target && e.target.reps, 0, 200, 8),
@@ -141,6 +143,8 @@ function normalize(raw) {
   s.settings.goalMode = st.goalMode === 'fixed' ? 'fixed' : 'auto';
   s.settings.manualGoal = clampInt(st.manualGoal, 1000, 50000, 8000);
   s.settings.restSec = clampInt(st.restSec, 0, 600, 90);
+  s.settings.name = str(st.name, 30);
+  s.askedName = !!raw.askedName;
   if (raw.steps && typeof raw.steps === 'object') {
     for (const [k, v] of Object.entries(raw.steps)) if (isKey(k)) s.steps[k] = clampInt(v, 0, 200000, 0);
   }
@@ -156,6 +160,7 @@ function normalize(raw) {
       id: str(x.id, 64) || uid(),
       date: new Date(x.date).toISOString(),
       routineName: str(x.routineName, 60, 'Workout') || 'Workout',
+      kind: x.kind === 'cardio' ? 'cardio' : 'strength',
       durationMin: clampInt(x.durationMin, 0, 600, 0),
       xp: clampInt(x.xp, 0, 2000, 0),
       sets: (Array.isArray(x.sets) ? x.sets : []).slice(0, 300).map(normSet).filter(Boolean),
@@ -166,6 +171,8 @@ function normalize(raw) {
   s.activeWorkout = normActive(raw.activeWorkout);
   s.lastBackup = raw.lastBackup ? isoOr(raw.lastBackup, null) : null;
   s.seeded = !!raw.seeded;
+  if (ACTIVITIES.includes(raw.lastActivity)) s.lastActivity = raw.lastActivity;
+  if (MINUTES.includes(raw.lastMinutes)) s.lastMinutes = raw.lastMinutes;
   return s;
 }
 
@@ -314,6 +321,7 @@ const BADGES = [
   { id: 'streak_7', icon: '🔥', name: 'On Fire', how: '7-day streak', test: (c) => c.bestStreak >= 7 },
   { id: 'streak_30', icon: '☄️', name: 'Unbroken', how: '30-day streak', test: (c) => c.bestStreak >= 30 },
   { id: 'volume_10t', icon: '🧱', name: '10 Tonnes', how: 'Lift 10,000 kg total', test: (c) => c.volume >= 10000 },
+  { id: 'cardio_10', icon: '💃', name: 'On the Move', how: '10 quick logs', test: (c) => c.cardio >= 10 },
   { id: 'level_5', icon: '⭐', name: 'Level 5', how: 'Reach level 5', test: (c) => c.level >= 5 },
   { id: 'level_10', icon: '🌟', name: 'Level 10', how: 'Reach level 10', test: (c) => c.level >= 10 },
   { id: 'level_20', icon: '👑', name: 'Level 20', how: 'Reach level 20', test: (c) => c.level >= 20 },
@@ -324,6 +332,7 @@ function badgeContext() {
   const stepVals = Object.values(data.steps);
   return {
     workouts: data.sessions.length,
+    cardio: data.sessions.filter((s) => s.kind === 'cardio').length,
     prEvents: recordsFrom(data.sessions).prEvents,
     bestDay: stepVals.length ? Math.max(...stepVals) : 0,
     totalSteps: stepVals.reduce((a, b) => a + b, 0),
@@ -409,7 +418,7 @@ function dailyTip() {
   else if (daysSince === null) tips.push('Start with one of the ready-made routines in Train. I\'ll set your targets from there.');
   else if (daysSince >= 4) tips.push(`It's been ${daysSince} days since your last workout. A short session today beats a perfect one next week.`);
   else if (daysSince >= 2) tips.push('You\'re rested. Today is a good day to train.');
-  if (steps == null) tips.push('No steps logged today yet. Run your RenStep Steps shortcut, then tap Add steps.');
+  if (steps == null) tips.push('No steps logged today yet. Run your RenStep Steps shortcut, then tap Paste steps.');
   else if (steps >= goal) tips.push(`Step goal smashed: ${fmtInt(steps)} steps.`);
   else if (now.getHours() >= 17) tips.push(`You're ${fmtInt(goal - steps)} steps short. A brisk 15-minute walk covers about 1,800.`);
   else tips.push(`${fmtInt(goal - steps)} steps to go today.`);
@@ -419,7 +428,7 @@ function dailyTip() {
 
 function nextRoutine() {
   if (!data.routines.length) return null;
-  const last = data.sessions[data.sessions.length - 1];
+  const last = [...data.sessions].reverse().find((s) => s.kind !== 'cardio');
   if (!last) return data.routines[0];
   const i = data.routines.findIndex((r) => r.name === last.routineName);
   return data.routines[(i + 1) % data.routines.length];
@@ -461,7 +470,7 @@ function go(tab, opts = {}) {
 function render() {
   const keepScroll = window.scrollY;
   document.querySelectorAll('.tabbar button').forEach((b) => b.classList.toggle('active', b.dataset.tab === ui.tab));
-  let title = TITLES[ui.tab];
+  let title = ui.tab === 'today' && data.settings.name ? `Hi ${data.settings.name}` : TITLES[ui.tab];
   let view;
   if (ui.tab === 'today') view = viewToday();
   else if (ui.tab === 'train') {
@@ -539,8 +548,9 @@ function viewToday() {
         h('div', { class: 'grow' },
           h('div', { class: 'big-num' }, fmtInt(steps)),
           h('div', { class: 'muted small' }, `steps of ${fmtInt(goal)} goal`, data.settings.goalMode === 'auto' ? ' (auto)' : ''),
-          h('div', { class: 'row', style: null },
-            h('button', { class: 'btn primary sm', onclick: () => openStepsSheet() }, '+ Add steps'))))),
+          h('div', { class: 'paste-cta' },
+            h('button', { class: 'btn primary sm', onclick: pasteSteps }, '📋 Paste steps'),
+            h('button', { class: 'btn sm', onclick: () => openStepsSheet() }, 'Type'))))),
     h('div', { class: 'card coach' },
       h('div', { class: 'who' }, 'Coach'),
       h('div', null, dailyTip())),
@@ -548,7 +558,9 @@ function viewToday() {
     nr && !data.activeWorkout ? h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('div', null, h('div', { class: 'small muted' }, 'Up next'), h('strong', null, nr.name)),
-        h('button', { class: 'btn primary sm', onclick: () => startWorkout(nr.id) }, 'Start'))) : null,
+        h('div', { class: 'row' },
+          h('button', { class: 'btn sm', onclick: openQuickLog }, '⚡ Quick log'),
+          h('button', { class: 'btn primary sm', onclick: () => startWorkout(nr.id) }, 'Start')))) : null,
     data.activeWorkout ? h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('div', null, h('div', { class: 'small muted' }, 'In progress'), h('strong', null, data.activeWorkout.routineName)),
@@ -556,7 +568,7 @@ function viewToday() {
     h('div', { class: 'card' },
       h('h2', null, 'Last 7 days'),
       weekChart(),
-      h('div', { class: 'small muted' }, 'Green bars hit the goal. The dashed line is today\'s goal.')),
+      h('div', { class: 'small muted' }, 'Pink bars hit the goal. The dashed line is today\'s goal.')),
     needsBackup ? h('div', { class: 'card' },
       h('div', { class: 'row between' },
         h('div', { class: 'small' }, backupDays === null ? 'You haven\'t backed up yet.' : `Last backup was ${backupDays} days ago.`),
@@ -573,7 +585,9 @@ function viewRoutines() {
           h('strong', null, r.name),
           h('div', { class: 'small muted' }, `${r.exercises.length} exercise${r.exercises.length === 1 ? '' : 's'}`)),
         h('span', { class: 'chev' }, '›')))) : h('div', { class: 'empty' }, 'No routines yet.'),
-    h('button', { class: 'btn block', onclick: () => openRoutineEditor(null) }, '+ New routine'),
+    h('div', { class: 'stack' },
+      h('button', { class: 'btn block', onclick: () => openRoutineEditor(null) }, '+ New routine'),
+      h('button', { class: 'btn block', onclick: openQuickLog }, '⚡ Quick log a walk, run or class')),
   );
 }
 
@@ -606,7 +620,7 @@ function startWorkout(routineId) {
     routineId: r.id, routineName: r.name, startedAt: new Date().toISOString(),
     exercises: r.exercises.map((ex, i) => {
       const t = coachTarget(ex);
-      return { name: ex.name, order: i, target: t,
+      return { name: ex.name, order: i, inc: ex.increment, target: t,
         sets: Array.from({ length: t.sets }, () => ({ weight: t.weight, reps: t.reps, done: false })) };
     }),
   };
@@ -626,14 +640,17 @@ function viewWorkout() {
     w.exercises.map((e, ei) => h('div', { class: 'card ex-card' },
       h('div', { class: 'row between' }, h('h3', null, e.name), h('span', { class: 'target' }, `${e.target.reps} @ ${fmtKg(e.target.weight)}`)),
       e.target.note ? h('div', { class: 'small muted' }, e.target.note) : null,
-      h('div', { class: 'set-row set-head' }, h('span', { class: 'center' }, 'Set'), h('span', { class: 'center' }, 'kg'), h('span', { class: 'center' }, 'Reps'), h('span')),
+      h('div', { class: 'set-row set-head' }, h('span', { class: 'center' }, '#'), h('span', { class: 'center' }, 'kg'), h('span', { class: 'center' }, 'Reps'), h('span')),
       e.sets.map((s, si) => setRow(ei, si, s)),
       h('div', { class: 'row' },
         h('button', { class: 'btn sm', onclick: () => {
           const prev = e.sets[e.sets.length - 1] || { weight: e.target.weight, reps: e.target.reps };
           e.sets.push({ weight: prev.weight, reps: prev.reps, done: false }); save(); render();
-        } }, '+ Add set'),
-        e.sets.length > 1 ? h('button', { class: 'btn sm', onclick: () => { e.sets.pop(); save(); render(); } }, '− Remove set') : null),
+        } }, '+ Set'),
+        e.sets.length > 1 ? h('button', { class: 'btn sm', onclick: () => { e.sets.pop(); save(); render(); } }, '− Set') : null,
+        e.sets.some((s) => !s.done) ? h('button', { class: 'btn primary sm', onclick: () => {
+          e.sets.forEach((s) => { s.done = true; }); save(); startRest(data.settings.restSec); render();
+        } }, '✓ All done') : null),
     )),
     h('div', { class: 'stack' },
       h('button', { class: 'btn primary block', onclick: finishWorkout }, 'Finish workout'),
@@ -643,18 +660,32 @@ function viewWorkout() {
   );
 }
 
+function stepper(value, label, mode, step, min, max, onChange) {
+  const input = h('input', { type: 'text', inputmode: mode, value: trimNum(value), 'aria-label': label,
+    onfocus: (ev) => ev.target.select(),
+    oninput: (ev) => onChange(clampNum(String(ev.target.value).replace(',', '.'), min, max, min)) });
+  const bump = (dir) => () => {
+    const cur = clampNum(String(input.value).replace(',', '.'), min, max, min);
+    const next = Math.min(max, Math.max(min, Math.round((cur + dir * step) * 100) / 100));
+    input.value = trimNum(next);
+    onChange(next);
+  };
+  return h('div', { class: 'stepper' },
+    h('button', { 'aria-label': `Less ${label}`, onclick: bump(-1) }, '−'), input,
+    h('button', { 'aria-label': `More ${label}`, onclick: bump(1) }, '+'));
+}
+
 function setRow(ei, si, s) {
   const w = data.activeWorkout;
-  const upd = (field, parse) => (ev) => { w.exercises[ei].sets[si][field] = parse(ev.target.value); save(); };
+  const ex = w.exercises[ei];
+  const set = ex.sets[si];
+  const wStep = ex.inc > 0 ? ex.inc : 2.5;
   return h('div', { class: s.done ? 'set-row done' : 'set-row' },
     h('span', { class: 'idx' }, String(si + 1)),
-    h('input', { type: 'text', inputmode: 'decimal', value: trimNum(s.weight), 'aria-label': `Set ${si + 1} weight in kg`,
-      oninput: upd('weight', (v) => clampNum(String(v).replace(',', '.'), 0, 2000, 0)) }),
-    h('input', { type: 'text', inputmode: 'numeric', value: String(s.reps), 'aria-label': `Set ${si + 1} reps`,
-      oninput: upd('reps', (v) => clampInt(v, 0, 1000, 0)) }),
+    stepper(s.weight, `set ${si + 1} kg`, 'decimal', wStep, 0, 2000, (v) => { set.weight = v; save(); }),
+    stepper(s.reps, `set ${si + 1} reps`, 'numeric', 1, 0, 1000, (v) => { set.reps = Math.round(v); save(); }),
     h('button', { class: s.done ? 'check done' : 'check', 'aria-label': s.done ? 'Mark set not done' : 'Mark set done', 'aria-pressed': s.done ? 'true' : 'false',
       onclick: () => {
-        const set = w.exercises[ei].sets[si];
         set.done = !set.done;
         save();
         if (set.done) startRest(data.settings.restSec);
@@ -701,37 +732,94 @@ function finishWorkout() {
   ));
 }
 
+// ---------- quick cardio log ----------
+const ACTIVITIES = ['🚶 Walk', '🏃 Run', '🚴 Cycle', '🧘 Yoga', '🏊 Swim', '💃 Dance', '🥊 Class', '🧗 Hike', '⛹️ Sport'];
+const MINUTES = [10, 15, 20, 30, 45, 60, 90];
+const cardioXP = (min) => 20 + Math.min(60, Math.round(min / 2));
+
+function openQuickLog() {
+  const st = { activity: data.lastActivity || ACTIVITIES[0], min: data.lastMinutes || 30 };
+  const body = () => h('div', { class: 'stack' },
+    h('div', { class: 'small muted' }, 'What did you do?'),
+    h('div', { class: 'chips' }, ACTIVITIES.map((a) => h('button', { class: a === st.activity ? 'chip on' : 'chip', onclick: () => { st.activity = a; rerender(); } }, a))),
+    h('div', { class: 'small muted' }, 'For how long?'),
+    h('div', { class: 'chips' }, MINUTES.map((m) => h('button', { class: m === st.min ? 'chip on' : 'chip', onclick: () => { st.min = m; rerender(); } }, `${m} min`))),
+    h('button', { class: 'btn primary block', onclick: () => {
+      const before = totals();
+      const xp = cardioXP(st.min);
+      data.sessions.push({ id: uid(), date: new Date(Date.now() - st.min * 60000).toISOString(), routineName: st.activity, kind: 'cardio', durationMin: st.min, xp, sets: [] });
+      data.sessions.sort((a, b) => a.date.localeCompare(b.date));
+      data.lastActivity = st.activity; data.lastMinutes = st.min;
+      save();
+      const fresh = syncBadges();
+      closeSheet(); render();
+      const lvl = totals().level;
+      toast(`${st.activity} logged: +${xp} XP${lvl > before.level ? ` · Level ${lvl}! 🎉` : ''}`, 3500);
+      if (fresh.length) setTimeout(() => toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000), 3600);
+    } }, `Log it (+${cardioXP(st.min)} XP)`),
+  );
+  const { rerender } = openSheet('Quick log', body);
+}
+
+// ---------- exercise library ----------
+// name, sets, min reps, max reps, start kg, kg step
+const LIBRARY = {
+  'Glutes & legs': [['Hip Thrust', 3, 8, 12, 40, 5], ['Back Squat', 3, 6, 10, 40, 5], ['Goblet Squat', 3, 8, 12, 12, 2], ['Romanian Deadlift', 3, 8, 12, 30, 5], ['Leg Press', 3, 10, 15, 60, 10], ['Walking Lunge', 3, 8, 12, 8, 2], ['Bulgarian Split Squat', 3, 8, 12, 6, 2], ['Cable Kickback', 3, 12, 15, 5, 2.5], ['Hip Abduction', 3, 12, 20, 30, 5], ['Leg Curl', 3, 10, 15, 20, 5], ['Leg Extension', 3, 10, 15, 20, 5], ['Calf Raise', 3, 12, 20, 20, 5]],
+  'Back & arms': [['Lat Pulldown', 3, 8, 12, 30, 2.5], ['Seated Cable Row', 3, 8, 12, 30, 2.5], ['Dumbbell Row', 3, 8, 12, 10, 2], ['Assisted Pull-up', 3, 6, 10, 0, 0], ['Bicep Curl', 3, 10, 15, 6, 1], ['Hammer Curl', 3, 10, 15, 6, 1], ['Tricep Pushdown', 3, 10, 15, 15, 2.5]],
+  'Chest & shoulders': [['Bench Press', 3, 6, 10, 30, 2.5], ['Dumbbell Bench Press', 3, 8, 12, 10, 2], ['Incline Dumbbell Press', 3, 8, 12, 8, 2], ['Overhead Press', 3, 6, 10, 20, 2.5], ['Dumbbell Shoulder Press', 3, 8, 12, 6, 2], ['Lateral Raise', 3, 12, 15, 4, 1], ['Push-up', 3, 8, 15, 0, 0]],
+  'Core & bodyweight': [['Glute Bridge', 3, 10, 20, 0, 0], ['Crunch', 3, 12, 25, 0, 0], ['Hanging Knee Raise', 3, 8, 15, 0, 0], ['Russian Twist', 3, 16, 30, 0, 0], ['Bodyweight Squat', 3, 12, 25, 0, 0], ['Mountain Climber', 3, 20, 40, 0, 0], ['Burpee', 3, 8, 15, 0, 0]],
+};
+const libEx = ([name, sets, repLow, repHigh, startWeight, increment]) => ({ id: uid(), name, sets, repLow, repHigh, startWeight, increment });
+
 // ---------- routine editor ----------
 function openRoutineEditor(routine) {
   const draft = {
     name: routine ? routine.name : '',
-    exercises: routine ? routine.exercises.map((e) => ({ ...e })) : [{ id: uid(), name: '', sets: 3, repLow: 8, repHigh: 12, startWeight: 20, increment: 2.5 }],
+    exercises: routine ? routine.exercises.map((e) => ({ ...e })) : [],
+    group: Object.keys(LIBRARY)[0],
+    custom: '',
   };
   const body = () => {
-    const field = (label, ex, key, mode) => h('label', { class: 'field' }, label,
-      h('input', { type: 'text', inputmode: mode, value: key === 'name' ? ex[key] : trimNum(ex[key]),
-        oninput: (ev) => { ex[key] = key === 'name' ? ev.target.value : String(ev.target.value).replace(',', '.'); } }));
+    const names = new Set(draft.exercises.map((e) => e.name));
     return h('div', { class: 'stack' },
       h('label', { class: 'field' }, 'Routine name',
-        h('input', { type: 'text', value: draft.name, maxlength: 60, placeholder: 'e.g. Push Day', oninput: (ev) => { draft.name = ev.target.value; } })),
+        h('input', { type: 'text', value: draft.name, maxlength: 60, placeholder: 'e.g. Glute Day', oninput: (ev) => { draft.name = ev.target.value; } })),
+      h('div', { class: 'small muted' }, 'Tap exercises to add them. Starting weights are guesses; change them on your first workout and the coach takes over.'),
+      h('div', { class: 'chips' }, Object.keys(LIBRARY).map((g) => h('button', { class: g === draft.group ? 'chip on' : 'chip', onclick: () => { draft.group = g; rerender(); } }, g))),
+      h('div', { class: 'chips' }, LIBRARY[draft.group].map((row) => h('button', {
+        class: names.has(row[0]) ? 'chip added' : 'chip',
+        onclick: () => { if (!names.has(row[0])) { draft.exercises.push(libEx(row)); rerender(); } },
+      }, names.has(row[0]) ? `✓ ${row[0]}` : `+ ${row[0]}`))),
+      h('div', { class: 'row' },
+        h('input', { type: 'text', class: 'grow', placeholder: 'Something else? Type it', value: draft.custom, maxlength: 60, oninput: (ev) => { draft.custom = ev.target.value; } }),
+        h('button', { class: 'btn sm', onclick: () => {
+          const n = str(draft.custom, 60);
+          if (!n) return;
+          draft.exercises.push({ id: uid(), name: n, sets: 3, repLow: 8, repHigh: 12, startWeight: 0, increment: 2.5 });
+          draft.custom = ''; rerender();
+        } }, 'Add')),
+      draft.exercises.length ? h('div', { class: 'section-label' }, `In this routine (${draft.exercises.length})`) : null,
       draft.exercises.map((ex, i) => h('div', { class: 'card stack' },
-        h('div', { class: 'row between' }, h('strong', null, `Exercise ${i + 1}`),
-          h('button', { class: 'btn danger sm', onclick: () => { draft.exercises.splice(i, 1); rerender(); } }, 'Remove')),
-        field('Name', ex, 'name'),
-        h('div', { class: 'grid3' }, field('Sets', ex, 'sets', 'numeric'), field('Min reps', ex, 'repLow', 'numeric'), field('Max reps', ex, 'repHigh', 'numeric')),
-        h('div', { class: 'grid2' }, field('Start weight (kg, 0 = bodyweight)', ex, 'startWeight', 'decimal'), field('Add per step (kg)', ex, 'increment', 'decimal')),
+        h('div', { class: 'row between' }, h('strong', null, ex.name),
+          h('div', { class: 'row' },
+            i > 0 ? h('button', { class: 'btn sm', 'aria-label': 'Move up', onclick: () => { draft.exercises.splice(i - 1, 0, draft.exercises.splice(i, 1)[0]); rerender(); } }, '↑') : null,
+            h('button', { class: 'btn danger sm', onclick: () => { draft.exercises.splice(i, 1); rerender(); } }, 'Remove'))),
+        h('div', { class: 'grid3' },
+          h('label', { class: 'field' }, 'Sets', stepper(ex.sets, 'sets', 'numeric', 1, 1, 12, (v) => { ex.sets = v; })),
+          h('label', { class: 'field' }, 'Min reps', stepper(ex.repLow, 'min reps', 'numeric', 1, 1, 100, (v) => { ex.repLow = v; })),
+          h('label', { class: 'field' }, 'Max reps', stepper(ex.repHigh, 'max reps', 'numeric', 1, 1, 200, (v) => { ex.repHigh = v; }))),
+        h('div', { class: 'grid2' },
+          h('label', { class: 'field' }, 'Start kg (0 = bodyweight)', stepper(ex.startWeight, 'start kg', 'decimal', ex.increment || 2.5, 0, 1000, (v) => { ex.startWeight = v; })),
+          h('label', { class: 'field' }, 'Add per step (kg)', stepper(ex.increment, 'kg step', 'decimal', 0.5, 0, 50, (v) => { ex.increment = v; }))),
       )),
-      h('button', { class: 'btn block', onclick: () => {
-        draft.exercises.push({ id: uid(), name: '', sets: 3, repLow: 8, repHigh: 12, startWeight: 20, increment: 2.5 }); rerender();
-      } }, '+ Add exercise'),
       h('button', { class: 'btn primary block', onclick: saveRoutine }, 'Save routine'),
-      h('div', { class: 'small muted' }, 'The coach keeps you at a weight until you hit max reps on every set, then adds the step amount.'),
     );
   };
   const saveRoutine = () => {
-    const name = str(draft.name, 60);
-    if (!name) { toast('Give the routine a name.'); return; }
+    const name = str(draft.name, 60) || (draft.exercises[0] ? `${draft.exercises[0].name} day` : '');
+    if (!name) { toast('Add at least one exercise.'); return; }
     const exercises = draft.exercises.map(normExercise).filter(Boolean);
+    if (!exercises.length) { toast('Add at least one exercise.'); return; }
     if (routine) { routine.name = name; routine.exercises = exercises; }
     else data.routines.push({ id: uid(), name, exercises });
     save();
@@ -768,20 +856,23 @@ function recordSteps(date, steps) {
   if (fresh.length) setTimeout(() => toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000), 2700);
 }
 
+async function pasteSteps() {
+  try {
+    const parsed = parseStepsText(await navigator.clipboard.readText());
+    if (!parsed) { toast('No steps on the clipboard. Run the RenStep Steps shortcut first.', 3500); return; }
+    if (parsed.date && parsed.date > todayKey()) { toast('That step count is dated in the future.'); return; }
+    closeSheet();
+    recordSteps(parsed.date || todayKey(), parsed.steps);
+  } catch (e) {
+    openStepsSheet();
+    toast('Paste was blocked. Long-press the Steps box and choose Paste.', 4000);
+  }
+}
+
 function openStepsSheet() {
   const state = { date: todayKey(), value: data.steps[todayKey()] != null ? String(data.steps[todayKey()]) : '' };
   const body = () => h('div', { class: 'stack' },
-    h('button', { class: 'btn primary block', onclick: async () => {
-      try {
-        const text = await navigator.clipboard.readText();
-        const parsed = parseStepsText(text);
-        if (!parsed) { toast('No step count found on the clipboard. Run the Shortcut first.'); return; }
-        closeSheet();
-        recordSteps(parsed.date || todayKey(), parsed.steps);
-      } catch (e) {
-        toast('Paste was blocked. Long-press the box below and choose Paste instead.', 4000);
-      }
-    } }, '📋 Paste from Shortcut'),
+    h('button', { class: 'btn primary block', onclick: pasteSteps }, '📋 Paste from Shortcut'),
     h('div', { class: 'small muted center' }, 'or enter it yourself'),
     h('div', { class: 'grid2' },
       h('label', { class: 'field' }, 'Date', h('input', { type: 'date', value: state.date, max: todayKey(), oninput: (ev) => { state.date = ev.target.value; } })),
@@ -811,7 +902,7 @@ function viewHistory() {
     const vol = s.sets.reduce((a, x) => a + x.reps * x.weight, 0);
     items[items.length - 1].append(h('button', { class: 'list-item', onclick: () => openSession(s.id) },
       h('div', { class: 'grow' }, h('strong', null, s.routineName),
-        h('div', { class: 'small muted' }, `${fmtDate(s.date)} · ${s.sets.length} sets${vol > 0 ? ` · ${fmtInt(vol)} kg` : ''} · +${s.xp} XP`)),
+        h('div', { class: 'small muted' }, s.kind === 'cardio' ? `${fmtDate(s.date)} · ${s.durationMin} min · +${s.xp} XP` : `${fmtDate(s.date)} · ${s.sets.length} sets${vol > 0 ? ` · ${fmtInt(vol)} kg` : ''} · +${s.xp} XP`)),
       h('span', { class: 'chev' }, '›')));
   }
   return h('div', null,
@@ -873,6 +964,11 @@ function openSettings() {
   const st = data.settings;
   openSheet('Settings', () => h('div', { class: 'stack' },
     h('div', { class: 'card stack' },
+      h('h2', null, 'You'),
+      h('label', { class: 'field' }, 'Your name',
+        h('input', { type: 'text', value: data.settings.name, maxlength: 30, autocomplete: 'given-name',
+          onchange: (ev) => { data.settings.name = str(ev.target.value, 30); save(); render(); } }))),
+    h('div', { class: 'card stack' },
       h('h2', null, 'Step goal'),
       h('label', { class: 'field' }, 'Goal type',
         h('select', { onchange: (ev) => { st.goalMode = ev.target.value === 'fixed' ? 'fixed' : 'auto'; save(); render(); } },
@@ -894,7 +990,8 @@ function openSettings() {
         h('li', null, 'Add ', h('strong', null, 'Format Date'), ': Current Date, Custom format ', h('code', null, 'yyyy-MM-dd'), '.'),
         h('li', null, 'Add ', h('strong', null, 'Text'), ': ', h('code', null, 'RENSTEP [Formatted Date] [Statistics Result]'), '.'),
         h('li', null, 'Add ', h('strong', null, 'Copy to Clipboard'), '.'),
-        h('li', null, 'Add it to your Home Screen. Tap it, open RenStep, tap Add steps, then Paste from Shortcut.')),
+        h('li', null, 'Add it to your Home Screen. Tap it, open RenStep, tap Paste steps.')),
+      h('div', { class: 'small' }, h('strong', null, 'Make it automatic: '), 'Shortcuts → Automation → New → Time of Day (e.g. 20:00, daily) → Run Immediately → RenStep Steps. Your steps are then waiting on the clipboard; open RenStep and tap Paste steps.'),
       h('div', { class: 'small muted' }, 'Allow Health access when asked. Check the first result against the Health app. If it is about double, your Watch and iPhone are both being counted: make sure Group By Day is on.')),
     h('div', { class: 'card stack' },
       h('h2', null, 'Backup'),
@@ -999,6 +1096,14 @@ function boot() {
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.error);
   render();
   importFromHash();
+  if (!data.askedName) {
+    data.askedName = true; save();
+    const st = { name: '' };
+    openSheet('Welcome to RenStep 💗', () => h('div', { class: 'stack' },
+      h('div', null, 'Steps, workouts and a coach that plans your next session for you. What should I call you?'),
+      h('input', { type: 'text', maxlength: 30, placeholder: 'Your name', autocomplete: 'given-name', oninput: (ev) => { st.name = ev.target.value; } }),
+      h('button', { class: 'btn primary block', onclick: () => { data.settings.name = str(st.name, 30); save(); closeSheet(); render(); } }, "Let's go")));
+  }
   const fresh = syncBadges();
   if (fresh.length) toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000);
 }
