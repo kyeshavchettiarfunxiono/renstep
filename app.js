@@ -998,7 +998,14 @@ function openPlanQuiz() {
     closeSheet();
     go('train');
     toast(`Your plan is ready: ${data.routines.filter((r) => r.generated).length} routines 💗`, 3500);
-    showNotes(takeNotes(['welcome']));
+    const welcome = () => showNotes(takeNotes(['welcome']));
+    if (cloudReady() && !cloud.auth) {
+      cloudCard.onDone = () => { closeSheet(); welcome(); };
+      setTimeout(() => openSheet('Last step: save your progress ☁️', () => h('div', { class: 'stack' },
+        h('div', null, 'Make an account so your workouts and steps are never lost, even if you change phones. You only do this once and stay signed in.'),
+        cloudCard(),
+        h('button', { class: 'btn sm', onclick: () => { cloudCard.onDone = null; closeSheet(); welcome(); } }, 'Skip for now'))), 300);
+    } else welcome();
   };
   const body = () => {
     const [q, key, opts] = Q[st.i];
@@ -1524,8 +1531,8 @@ function cloudCard() {
       await signIn(email, f.password, create);
       f.password = '';
       toast(create ? 'Cloud backup is on ☁️' : 'Signed in. Your data is synced ☁️');
-      sheetState && sheetState.rerender();
       render();
+      if (cloudCard.onDone) { const done = cloudCard.onDone; cloudCard.onDone = null; done(); } else if (sheetState) sheetState.rerender();
     } catch (e) { toast(e.message, 4000); }
   };
   return h('div', { class: 'card stack' },
@@ -1534,8 +1541,9 @@ function cloudCard() {
     h('input', { type: 'email', placeholder: 'Email', autocomplete: 'username', value: f.email, oninput: (ev) => { f.email = ev.target.value; } }),
     h('input', { type: 'password', placeholder: 'Password (6+ characters)', autocomplete: 'current-password', value: f.password, oninput: (ev) => { f.password = ev.target.value; } }),
     h('div', { class: 'grid2' },
-      h('button', { class: 'btn primary', onclick: go2(false) }, 'Sign in'),
-      h('button', { class: 'btn', onclick: go2(true) }, 'Create account')),
+      cloudCard.onDone
+        ? [h('button', { class: 'btn primary', onclick: go2(true) }, 'Create account'), h('button', { class: 'btn', onclick: go2(false) }, 'Sign in')]
+        : [h('button', { class: 'btn primary', onclick: go2(false) }, 'Sign in'), h('button', { class: 'btn', onclick: go2(true) }, 'Create account')]),
     h('button', { class: 'btn sm', onclick: async () => {
       if (!f.email.trim()) { toast('Type your email first.'); return; }
       try { await resetPassword(f.email.trim()); toast('Password reset email sent.'); } catch (e) { toast(e.message); }

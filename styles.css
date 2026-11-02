@@ -91,7 +91,7 @@ main {
 .btn.sm { padding: 8px 12px; font-size: 14px; border-radius: 10px; }
 .btn:disabled { opacity: 0.4; }
 
-input[type=text], input[type=number], input:not([type]), select {
+input[type=text], input[type=number], input[type=email], input[type=password], input[type=date], input:not([type]), select {
   width: 100%; padding: 11px 12px; border-radius: 10px;
   border: 1px solid var(--line); background: var(--bg);
   font-size: 16px; /* 16px stops iOS zooming on focus */
