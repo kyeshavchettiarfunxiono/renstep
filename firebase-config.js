@@ -2,6 +2,6 @@
 // Data access is controlled by the Firestore rules in firestore.rules.
 // Leave both empty to turn cloud sync off.
 window.RENSTEP_FIREBASE = {
-  apiKey: '',
-  projectId: '',
+  apiKey: 'AIzaSyDPEDn7RrQwij9eD88HuBJkE-rYiJSGJzI',
+  projectId: 'renstep-66457',
 };
