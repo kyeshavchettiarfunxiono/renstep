@@ -618,7 +618,7 @@ function viewToday() {
   const streak = currentStreak();
   const nr = nextRoutine();
   const backupDays = data.lastBackup ? Math.floor((Date.now() - Date.parse(data.lastBackup)) / DAY_MS) : null;
-  const needsBackup = (data.sessions.length > 0 || Object.keys(data.steps).length > 3) && (backupDays === null || backupDays >= 14);
+  const needsBackup = (data.sessions.length > 0 || Object.keys(data.steps).length > 3) && (backupDays === null || backupDays >= 7);
 
   return h('div', null,
     h('div', { class: 'card' },
@@ -655,10 +655,12 @@ function viewToday() {
       h('h2', null, 'Last 7 days'),
       weekChart(),
       h('div', { class: 'small muted' }, 'Pink bars hit the goal. The dashed line is today\'s goal.')),
-    needsBackup ? h('div', { class: 'card' },
-      h('div', { class: 'row between' },
-        h('div', { class: 'small' }, backupDays === null ? 'You haven\'t backed up yet.' : `Last backup was ${backupDays} days ago.`),
-        h('button', { class: 'btn sm', onclick: exportBackup }, 'Back up'))) : null,
+    needsBackup ? h('div', { class: 'card note' },
+      h('div', { class: 'who' }, '🛟 Weekly backup'),
+      h('div', null, backupDays === null ? 'Keep your progress safe: save a backup to iCloud Drive.' : `Last backup was ${backupDays} days ago. Save a fresh one so nothing gets lost.`),
+      h('div', { class: 'paste-cta' },
+        h('button', { class: 'btn primary sm', onclick: exportBackup }, 'Save backup'),
+        h('div', { class: 'small muted' }, 'In the share sheet, tap Save to Files, then iCloud Drive.'))) : null,
   );
 }
 
