@@ -1,9 +1,9 @@
 // Offline support. Network first so updates show up straight away when online,
 // cached copy when offline. Only same-origin GET requests are handled.
-const CACHE = 'renstep-v4';
+const CACHE = 'renstep-v5';
 const SHELL = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
-  'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'notes.js'
+  'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'notes.js', 'firebase-config.js'
 ];
 
 self.addEventListener('install', (event) => {

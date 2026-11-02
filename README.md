@@ -28,3 +28,6 @@ Data lives in the browser storage of the Home Screen app. Deleting the app, or c
 ## Files
 `index.html`, `styles.css`, `app.js` (all logic), `sw.js` (offline cache), `manifest.webmanifest`, `icons/`.
 After changing files, bump `CACHE` in `sw.js` so phones pick up the new version.
+
+## Cloud sync (optional)
+Set `apiKey` and `projectId` in `firebase-config.js` to turn on sign-in and automatic sync. The app talks to Firebase Auth and Firestore over their REST APIs (no SDK). Data is split into small documents under `users/{uid}/chunks/`, and `firestore.rules` limits every user to their own folder. Once everyone has an account, turn off new sign-ups in Firebase: Authentication → Settings → User actions → untick "Enable create (sign-up)".

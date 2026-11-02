@@ -188,6 +188,8 @@ function normalize(raw) {
   s.seeded = !!raw.seeded;
   if (ACTIVITIES.includes(raw.lastActivity)) s.lastActivity = raw.lastActivity;
   if (MINUTES.includes(raw.lastMinutes)) s.lastMinutes = raw.lastMinutes;
+  s.coreUpdatedAt = clampInt(raw.coreUpdatedAt, 0, 1e13, 0);
+  s.deleted = Array.isArray(raw.deleted) ? raw.deleted.filter((x) => typeof x === 'string').slice(-2000) : [];
   return s;
 }
 
@@ -202,9 +204,14 @@ function load() {
     toast('Could not read saved data. Restore a backup in Settings if needed.', 5000);
   }
 }
-function save() {
+let lastCoreJSON = null;
+function save(opts = {}) {
   try {
+    const core = JSON.stringify(coreOf(data));
+    if (lastCoreJSON !== null && core !== lastCoreJSON && !opts.fromSync) data.coreUpdatedAt = Date.now();
+    lastCoreJSON = core;
     localStorage.setItem(STORE_KEY, JSON.stringify(data));
+    if (!opts.fromSync) scheduleSync();
   } catch (e) {
     console.error(e);
     toast('Saving failed: storage may be full. Export a backup.', 5000);
@@ -618,7 +625,7 @@ function viewToday() {
   const streak = currentStreak();
   const nr = nextRoutine();
   const backupDays = data.lastBackup ? Math.floor((Date.now() - Date.parse(data.lastBackup)) / DAY_MS) : null;
-  const needsBackup = (data.sessions.length > 0 || Object.keys(data.steps).length > 3) && (backupDays === null || backupDays >= 7);
+  const needsBackup = !cloud.auth && (data.sessions.length > 0 || Object.keys(data.steps).length > 3) && (backupDays === null || backupDays >= 7);
 
   return h('div', null,
     h('div', { class: 'card' },
@@ -655,7 +662,11 @@ function viewToday() {
       h('h2', null, 'Last 7 days'),
       weekChart(),
       h('div', { class: 'small muted' }, 'Pink bars hit the goal. The dashed line is today\'s goal.')),
-    needsBackup ? h('div', { class: 'card note' },
+    cloudReady() && !cloud.auth ? h('div', { class: 'card note' },
+      h('div', { class: 'who' }, '☁️ Cloud backup'),
+      h('div', null, 'Sign in once and your progress saves itself, even if you change phones.'),
+      h('div', { class: 'paste-cta' }, h('button', { class: 'btn primary sm', onclick: openSettings }, 'Turn it on'))) : null,
+    needsBackup && !cloudReady() ? h('div', { class: 'card note' },
       h('div', { class: 'who' }, '🛟 Weekly backup'),
       h('div', null, backupDays === null ? 'Keep your progress safe: save a backup to iCloud Drive.' : `Last backup was ${backupDays} days ago. Save a fresh one so nothing gets lost.`),
       h('div', { class: 'paste-cta' },
@@ -1137,7 +1148,7 @@ function openSession(id) {
         h('span', { class: 'muted' }, `Set ${i + 1}`), h('span', null, x.weight > 0 ? `${fmtKg(x.weight)} × ${x.reps}` : `${x.reps} reps`))))),
     h('button', { class: 'btn danger block', onclick: () => {
       if (confirm('Delete this workout from your history? Its XP will be removed (badges stay).')) {
-        data.sessions = data.sessions.filter((x) => x.id !== id); save(); closeSheet(); render();
+        data.sessions = data.sessions.filter((x) => x.id !== id); data.deleted.push(id); save(); closeSheet(); render();
       } } }, 'Delete workout'),
   ));
 }
@@ -1219,8 +1230,9 @@ function openSettings() {
         h('li', null, 'Add it to your Home Screen. Tap it, open RenStep, tap Paste steps.')),
       h('div', { class: 'small' }, h('strong', null, 'Make it automatic: '), 'Shortcuts → Automation → New → Time of Day (e.g. 20:00, daily) → Run Immediately → RenStep Steps. Your steps are then waiting on the clipboard; open RenStep and tap Paste steps.'),
       h('div', { class: 'small muted' }, 'Allow Health access when asked. Check the first result against the Health app. If it is about double, your Watch and iPhone are both being counted: make sure Group By Day is on.')),
+    cloudCard(),
     h('div', { class: 'card stack' },
-      h('h2', null, 'Backup'),
+      h('h2', null, 'Backup file'),
       h('div', { class: 'small muted' }, `Your data lives only on this phone. ${data.lastBackup ? `Last backup: ${fmtDate(data.lastBackup)}.` : 'No backup yet.'} Save a backup to Files or iCloud Drive every couple of weeks.`),
       h('button', { class: 'btn primary block', onclick: exportBackup }, 'Export backup'),
       h('label', { class: 'btn block center' }, 'Restore from backup',
@@ -1228,10 +1240,10 @@ function openSettings() {
     h('div', { class: 'card stack' },
       h('h2', null, 'Danger zone'),
       h('button', { class: 'btn danger block', onclick: () => {
-        if (confirm('Erase ALL RenStep data on this phone? Export a backup first if you might want it.') && confirm('Really erase everything? This cannot be undone.')) {
-          localStorage.removeItem(STORE_KEY); data = defaultState(); seedIfNeeded(); stopRest(); closeSheet(); go('today'); toast('All data erased.');
+        if (confirm(`Erase ALL RenStep data on this phone?${cloud.auth ? ' You will be signed out; your cloud copy is kept and comes back when you sign in again.' : ' Export a backup first if you might want it.'}`) && confirm('Really erase everything on this phone?')) {
+          signOut(true); localStorage.removeItem(STORE_KEY); data = defaultState(); lastCoreJSON = null; seedIfNeeded(); stopRest(); closeSheet(); go('today'); toast('All data erased.');
         } } }, 'Erase all data')),
-    h('div', { class: 'small muted center' }, 'RenStep makes no network requests with your data.'),
+    h('div', { class: 'small muted center' }, cloud.auth ? 'Your data syncs only to your own private cloud folder.' : 'RenStep makes no network requests with your data.'),
   ));
 }
 
@@ -1301,6 +1313,235 @@ function closeSheet() {
   sheetState = null;
 }
 
+// ---------- cloud sync (Firebase Auth + Firestore REST, no SDK) ----------
+// The phone stays the source of truth and works offline. When signed in, changes are pushed
+// a few seconds after each save, and the cloud copy is pulled and merged when the app opens.
+const AUTH_KEY = 'renstep.auth';
+const SYNC_KEY = 'renstep.sync';
+const CORE_KEYS = ['createdAt', 'settings', 'routines', 'badges', 'notesSeen', 'plan', 'askedName', 'seeded', 'lastBackup', 'lastActivity', 'lastMinutes', 'deleted'];
+const cloud = { auth: null, status: '', busy: false, timer: null, again: false };
+
+function cloudReady() {
+  const c = window.RENSTEP_FIREBASE;
+  return !!(c && typeof c.apiKey === 'string' && c.apiKey && typeof c.projectId === 'string' && /^[a-z0-9-]{4,40}$/.test(c.projectId));
+}
+function coreOf(d) { const o = {}; for (const k of CORE_KEYS) o[k] = d[k]; return o; }
+function readJSON(key) { try { return JSON.parse(localStorage.getItem(key)) || null; } catch (e) { return null; } }
+function syncState() { return readJSON(SYNC_KEY) || { hashes: {}, lastSync: null }; }
+function writeSyncState(st) { try { localStorage.setItem(SYNC_KEY, JSON.stringify(st)); } catch (e) { /* ignore */ } }
+cloud.auth = (() => { const a = readJSON(AUTH_KEY); return a && typeof a.uid === 'string' && typeof a.refreshToken === 'string' ? a : null; })();
+function saveAuth() { try { cloud.auth ? localStorage.setItem(AUTH_KEY, JSON.stringify(cloud.auth)) : localStorage.removeItem(AUTH_KEY); } catch (e) { /* ignore */ } }
+
+const AUTH_ERRORS = {
+  EMAIL_EXISTS: 'That email already has an account. Use Sign in instead.',
+  EMAIL_NOT_FOUND: 'Wrong email or password.',
+  INVALID_PASSWORD: 'Wrong email or password.',
+  INVALID_LOGIN_CREDENTIALS: 'Wrong email or password.',
+  INVALID_EMAIL: 'That email address doesn\'t look right.',
+  MISSING_PASSWORD: 'Enter a password.',
+  TOO_MANY_ATTEMPTS_TRY_LATER: 'Too many tries. Wait a few minutes and try again.',
+  OPERATION_NOT_ALLOWED: 'New accounts are switched off for this app.',
+  ADMIN_ONLY_OPERATION: 'New accounts are switched off for this app.',
+  USER_DISABLED: 'This account has been disabled.',
+};
+async function authPost(url, body, form) {
+  const res = await fetch(url, form
+    ? { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body }
+    : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const code = String((j.error && j.error.message) || res.status).split(' ')[0].split(':')[0];
+    const err = new Error(AUTH_ERRORS[code] || (code.startsWith('WEAK_PASSWORD') ? 'Use at least 6 characters for the password.' : `Sign-in failed (${code}).`));
+    err.code = code;
+    throw err;
+  }
+  return j;
+}
+const keyParam = () => `key=${encodeURIComponent(window.RENSTEP_FIREBASE.apiKey)}`;
+
+async function signIn(email, password, create) {
+  const j = await authPost(`https://identitytoolkit.googleapis.com/v1/accounts:${create ? 'signUp' : 'signInWithPassword'}?${keyParam()}`,
+    { email, password, returnSecureToken: true });
+  cloud.auth = { uid: j.localId, email: j.email, idToken: j.idToken, refreshToken: j.refreshToken, expiresAt: Date.now() + Number(j.expiresIn || 3600) * 1000 };
+  saveAuth();
+  writeSyncState({ hashes: {}, lastSync: null }); // first sync on this phone: cloud settings win
+  await syncNow();
+}
+async function resetPassword(email) {
+  await authPost(`https://identitytoolkit.googleapis.com/v1/accounts:sendOobCode?${keyParam()}`, { requestType: 'PASSWORD_RESET', email });
+}
+function signOut(quiet) {
+  cloud.auth = null; saveAuth();
+  writeSyncState({ hashes: {}, lastSync: null });
+  cloud.status = '';
+  if (!quiet) { toast('Signed out. Your data stays on this phone.'); }
+}
+async function idToken() {
+  const a = cloud.auth;
+  if (!a) throw new Error('Not signed in');
+  if (a.idToken && Date.now() < a.expiresAt - 60000) return a.idToken;
+  try {
+    const j = await authPost(`https://securetoken.googleapis.com/v1/token?${keyParam()}`,
+      `grant_type=refresh_token&refresh_token=${encodeURIComponent(a.refreshToken)}`, true);
+    Object.assign(a, { idToken: j.id_token, refreshToken: j.refresh_token, expiresAt: Date.now() + Number(j.expires_in || 3600) * 1000 });
+    saveAuth();
+    return a.idToken;
+  } catch (e) {
+    if (['TOKEN_EXPIRED', 'USER_DISABLED', 'USER_NOT_FOUND', 'INVALID_REFRESH_TOKEN'].includes(e.code)) {
+      signOut(true); render();
+      throw new Error('Please sign in again.');
+    }
+    throw e;
+  }
+}
+function chunksUrl() {
+  const c = window.RENSTEP_FIREBASE;
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(c.projectId)}/databases/(default)/documents/users/${encodeURIComponent(cloud.auth.uid)}/chunks`;
+}
+async function fsFetch(url, init = {}) {
+  const t = await idToken();
+  const res = await fetch(url, { ...init, headers: { ...(init.headers || {}), Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' } });
+  if (!res.ok && res.status !== 404) throw new Error(`Cloud error ${res.status}`);
+  return res;
+}
+async function pullChunks() {
+  const out = {};
+  let page = '';
+  do {
+    const res = await fsFetch(`${chunksUrl()}?pageSize=300${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`);
+    if (res.status === 404) break;
+    const j = await res.json();
+    for (const d of j.documents || []) {
+      const id = String(d.name || '').split('/').pop();
+      try { out[id] = JSON.parse(d.fields.json.stringValue); } catch (e) { /* skip bad chunk */ }
+    }
+    page = j.nextPageToken || '';
+  } while (page);
+  return out;
+}
+async function putChunk(id, obj) {
+  await fsFetch(`${chunksUrl()}/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ fields: { json: { stringValue: JSON.stringify(obj) }, updatedAt: { integerValue: String(Date.now()) } } }),
+  });
+}
+// Split the data into small documents so no single one grows past Firestore's 1 MB limit.
+function toChunks(d) {
+  const out = { core: { ...coreOf(d), coreUpdatedAt: d.coreUpdatedAt } };
+  for (const [k, v] of Object.entries(d.steps)) (out[`steps-${k.slice(0, 4)}`] = out[`steps-${k.slice(0, 4)}`] || {})[k] = v;
+  for (const sess of d.sessions) (out[`sessions-${sess.date.slice(0, 7)}`] = out[`sessions-${sess.date.slice(0, 7)}`] || []).push(sess);
+  return out;
+}
+function mergeCloud(local, remote, cloudWinsCore) {
+  const out = JSON.parse(JSON.stringify(local));
+  const rc = remote.core && typeof remote.core === 'object' ? remote.core : null;
+  // Steps: this phone's numbers win; days only in the cloud are filled in.
+  for (const [id, obj] of Object.entries(remote)) {
+    if (!id.startsWith('steps-') || !obj || typeof obj !== 'object') continue;
+    for (const [k, v] of Object.entries(obj)) if (!(k in out.steps)) out.steps[k] = v;
+  }
+  // Workouts: union by id, minus anything deleted on either side.
+  const deleted = new Set([...(out.deleted || []), ...((rc && Array.isArray(rc.deleted)) ? rc.deleted : [])]);
+  const byId = new Map(out.sessions.map((x) => [x.id, x]));
+  for (const [id, arr] of Object.entries(remote)) {
+    if (!id.startsWith('sessions-') || !Array.isArray(arr)) continue;
+    for (const x of arr) if (x && typeof x.id === 'string' && !byId.has(x.id)) byId.set(x.id, x);
+  }
+  out.sessions = [...byId.values()].filter((x) => !deleted.has(x.id));
+  out.deleted = [...deleted].slice(-2000);
+  // Settings, routines, plan: whichever side changed last wins.
+  if (rc && (cloudWinsCore || (Number(rc.coreUpdatedAt) || 0) > (out.coreUpdatedAt || 0))) {
+    for (const k of CORE_KEYS) if (k !== 'deleted' && rc[k] !== undefined) out[k] = rc[k];
+    out.coreUpdatedAt = Number(rc.coreUpdatedAt) || 0;
+  }
+  if (rc) {
+    out.badges = [...new Set([...(local.badges || []), ...(Array.isArray(rc.badges) ? rc.badges : [])])];
+    out.notesSeen = [...new Set([...(local.notesSeen || []), ...(Array.isArray(rc.notesSeen) ? rc.notesSeen : [])])];
+  }
+  return out;
+}
+const hashOf = (str) => { let h1 = 5381; for (let i = 0; i < str.length; i++) h1 = ((h1 << 5) + h1 + str.charCodeAt(i)) | 0; return `${str.length}:${h1}`; };
+
+function scheduleSync() {
+  if (!cloud.auth || !cloudReady()) return;
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(() => syncNow({ pushOnly: true }), 3000);
+}
+async function syncNow(opts = {}) {
+  if (!cloud.auth || !cloudReady() || !navigator.onLine) return;
+  if (cloud.busy) { cloud.again = true; return; }
+  cloud.busy = true;
+  try {
+    const st = syncState();
+    if (!opts.pushOnly || !st.lastSync) {
+      const remote = await pullChunks();
+      const merged = normalize(mergeCloud(data, remote, !st.lastSync));
+      merged.activeWorkout = data.activeWorkout; // in-progress workouts stay on this phone
+      const changed = JSON.stringify(merged) !== JSON.stringify(data);
+      data = merged;
+      lastCoreJSON = JSON.stringify(coreOf(data));
+      save({ fromSync: true });
+      if (changed && !sheetState && !data.activeWorkout) render();
+    }
+    const chunks = toChunks(data);
+    for (const id of Object.keys(st.hashes)) if (!(id in chunks)) chunks[id] = id.startsWith('sessions-') ? [] : (id === 'core' ? chunks.core : {});
+    let pushed = 0;
+    for (const [id, obj] of Object.entries(chunks)) {
+      const hsh = hashOf(JSON.stringify(obj));
+      if (st.hashes[id] === hsh) continue;
+      await putChunk(id, obj);
+      st.hashes[id] = hsh;
+      pushed++;
+    }
+    st.lastSync = new Date().toISOString();
+    writeSyncState(st);
+    cloud.status = '';
+  } catch (e) {
+    console.error(e);
+    cloud.status = e.message || 'Sync failed';
+  } finally {
+    cloud.busy = false;
+    if (cloud.again) { cloud.again = false; syncNow({ pushOnly: true }); }
+  }
+}
+
+function cloudCard() {
+  if (!cloudReady()) return null;
+  if (cloud.auth) {
+    const st = syncState();
+    return h('div', { class: 'card stack' },
+      h('h2', null, '☁️ Cloud backup'),
+      h('div', { class: 'small' }, `Signed in as ${cloud.auth.email || 'you'}.`),
+      h('div', { class: 'small muted' }, cloud.status ? `⚠️ ${cloud.status}` : st.lastSync ? `Last synced ${new Date(st.lastSync).toLocaleString('en-ZA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}. Saves automatically.` : 'Syncing…'),
+      h('button', { class: 'btn block', onclick: async () => { await syncNow(); sheetState && sheetState.rerender(); toast(cloud.status ? cloud.status : 'Synced ✓'); } }, 'Sync now'),
+      h('button', { class: 'btn danger block', onclick: () => { if (confirm('Sign out? Your data stays on this phone and in the cloud.')) { signOut(); sheetState && sheetState.rerender(); render(); } } }, 'Sign out'));
+  }
+  const f = cloudCard.form || (cloudCard.form = { email: '', password: '' });
+  const go2 = (create) => async () => {
+    const email = f.email.trim();
+    if (!email || !f.password) { toast('Enter your email and a password.'); return; }
+    try {
+      await signIn(email, f.password, create);
+      f.password = '';
+      toast(create ? 'Cloud backup is on ☁️' : 'Signed in. Your data is synced ☁️');
+      sheetState && sheetState.rerender();
+      render();
+    } catch (e) { toast(e.message, 4000); }
+  };
+  return h('div', { class: 'card stack' },
+    h('h2', null, '☁️ Cloud backup'),
+    h('div', { class: 'small muted' }, 'Sign in once and your progress saves itself to your own private cloud folder. Sign in on a new phone to get everything back.'),
+    h('input', { type: 'email', placeholder: 'Email', autocomplete: 'username', value: f.email, oninput: (ev) => { f.email = ev.target.value; } }),
+    h('input', { type: 'password', placeholder: 'Password (6+ characters)', autocomplete: 'current-password', value: f.password, oninput: (ev) => { f.password = ev.target.value; } }),
+    h('div', { class: 'grid2' },
+      h('button', { class: 'btn primary', onclick: go2(false) }, 'Sign in'),
+      h('button', { class: 'btn', onclick: go2(true) }, 'Create account')),
+    h('button', { class: 'btn sm', onclick: async () => {
+      if (!f.email.trim()) { toast('Type your email first.'); return; }
+      try { await resetPassword(f.email.trim()); toast('Password reset email sent.'); } catch (e) { toast(e.message); }
+    } }, 'Forgot password?'));
+}
+
 // ---------- boot ----------
 function importFromHash() {
   // Optional: a Shortcut can open .../#steps=2026-11-02:8432 (works when the app runs in Safari).
@@ -1317,18 +1558,22 @@ function boot() {
   $('#settingsBtn').addEventListener('click', openSettings);
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && sheetState) closeSheet(); });
   // Re-render when the app comes back to the foreground so "today" rolls over at midnight.
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !sheetState) render(); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') { if (!sheetState) render(); syncNow(); } });
+  window.addEventListener('online', () => syncNow());
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(console.error);
+  lastCoreJSON = JSON.stringify(coreOf(data));
   render();
   importFromHash();
+  syncNow();
   if (!data.askedName) {
     data.askedName = true; save();
     const st = { name: '' };
     openSheet('Welcome to RenStep 💗', () => h('div', { class: 'stack' },
       h('div', null, 'Steps, workouts and a coach that plans your next session for you. What should I call you?'),
       h('input', { type: 'text', maxlength: 30, placeholder: 'Your name', autocomplete: 'given-name', oninput: (ev) => { st.name = ev.target.value; } }),
-      h('button', { class: 'btn primary block', onclick: () => { data.settings.name = str(st.name, 30); save(); render(); openPlanQuiz(); } }, "Let's go")));
+      h('button', { class: 'btn primary block', onclick: () => { data.settings.name = str(st.name, 30); save(); render(); openPlanQuiz(); } }, "Let's go"),
+      cloudReady() ? h('button', { class: 'btn block', onclick: () => { closeSheet(); openSettings(); } }, 'Already use RenStep? Sign in to restore') : null));
   }
   const fresh = syncBadges();
   if (fresh.length) toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000);
