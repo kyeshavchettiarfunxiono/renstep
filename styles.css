@@ -34,7 +34,7 @@ h1, h2, h3 { margin: 0; }
   background: rgba(0, 0, 0, 0.9);
   backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
 }
-.brand { font-size: 13px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); }
+.brand { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 800; letter-spacing: 1.5px; text-transform: uppercase; color: var(--accent); }
 .topbar h1 { font-size: 30px; font-weight: 800; letter-spacing: -0.5px; }
 .icon-btn {
   width: 40px; height: 40px; border-radius: 50%; border: 0;
@@ -219,3 +219,7 @@ code { background: var(--card-2); padding: 1px 6px; border-radius: 6px; font-siz
 .chip.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
 .chip.added { opacity: 0.45; }
 .paste-cta { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.brand .logo { width: 20px; height: 20px; border-radius: 5px; }
+.note { border-left: 4px solid var(--accent); background: linear-gradient(135deg, rgba(255,31,143,0.14), var(--card) 60%); }
+.note .who { font-size: 12px; font-weight: 800; color: var(--accent); letter-spacing: 0.6px; text-transform: uppercase; }
+.note-text { font-size: 17px; margin: 6px 0; }

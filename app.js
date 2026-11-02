@@ -69,7 +69,9 @@ function defaultState() {
   return {
     version: 1,
     createdAt: new Date().toISOString(),
-    settings: { goalMode: 'auto', manualGoal: 8000, restSec: 90, name: '' },
+    settings: { goalMode: 'auto', manualGoal: 8000, restSec: 90, name: '', vibe: 'hype', daysPerWeek: 3 },
+    plan: null,
+    notesSeen: [],
     askedName: false,
     steps: {},
     routines: [],
@@ -144,6 +146,18 @@ function normalize(raw) {
   s.settings.manualGoal = clampInt(st.manualGoal, 1000, 50000, 8000);
   s.settings.restSec = clampInt(st.restSec, 0, 600, 90);
   s.settings.name = str(st.name, 30);
+  s.settings.vibe = ['hype', 'gentle', 'sassy'].includes(st.vibe) ? st.vibe : 'hype';
+  s.settings.daysPerWeek = clampInt(st.daysPerWeek, 1, 7, 3);
+  if (raw.plan && typeof raw.plan === 'object') {
+    const pl = raw.plan;
+    s.plan = {
+      goal: Object.keys(GOALS).includes(pl.goal) ? pl.goal : 'consistent',
+      days: clampInt(pl.days, 1, 7, 3),
+      place: pl.place === 'home' ? 'home' : 'gym',
+      minutes: [20, 30, 45, 60].includes(pl.minutes) ? pl.minutes : 45,
+    };
+  }
+  if (Array.isArray(raw.notesSeen)) s.notesSeen = raw.notesSeen.filter((k) => typeof k === 'string').slice(0, 50);
   s.askedName = !!raw.askedName;
   if (raw.steps && typeof raw.steps === 'object') {
     for (const [k, v] of Object.entries(raw.steps)) if (isKey(k)) s.steps[k] = clampInt(v, 0, 200000, 0);
@@ -152,6 +166,7 @@ function normalize(raw) {
     s.routines = raw.routines.slice(0, 50).filter((r) => r && typeof r === 'object').map((r) => ({
       id: str(r.id, 64) || uid(),
       name: str(r.name, 60, 'Routine') || 'Routine',
+      generated: !!r.generated || ['Upper Body', 'Lower Body', 'Home Bodyweight'].includes(r.name),
       exercises: (Array.isArray(r.exercises) ? r.exercises : []).slice(0, 30).map(normExercise).filter(Boolean),
     }));
   }
@@ -200,20 +215,20 @@ function seedIfNeeded() {
   if (data.seeded) return;
   const ex = (name, sets, repLow, repHigh, startWeight, increment) => ({ id: uid(), name, sets, repLow, repHigh, startWeight, increment });
   data.routines.push(
-    { id: uid(), name: 'Upper Body', exercises: [
+    { id: uid(), name: 'Upper Body', generated: true, exercises: [
       ex('Bench Press', 3, 6, 10, 40, 2.5),
       ex('Bent-over Row', 3, 8, 12, 30, 2.5),
       ex('Overhead Press', 3, 6, 10, 25, 2.5),
       ex('Lat Pulldown', 3, 8, 12, 35, 2.5),
       ex('Bicep Curl', 2, 10, 15, 10, 1),
     ] },
-    { id: uid(), name: 'Lower Body', exercises: [
+    { id: uid(), name: 'Lower Body', generated: true, exercises: [
       ex('Back Squat', 3, 6, 10, 50, 5),
       ex('Romanian Deadlift', 3, 8, 12, 40, 5),
       ex('Walking Lunge', 3, 8, 12, 10, 2),
       ex('Calf Raise', 3, 12, 20, 20, 5),
     ] },
-    { id: uid(), name: 'Home Bodyweight', exercises: [
+    { id: uid(), name: 'Home Bodyweight', generated: true, exercises: [
       ex('Push-up', 3, 8, 15, 0, 0),
       ex('Bodyweight Squat', 3, 12, 25, 0, 0),
       ex('Glute Bridge', 3, 10, 20, 0, 0),
@@ -405,6 +420,70 @@ function coachTarget(ex) {
     note: `Same weight, one more rep. Aim for ${reps} on every set. At ${ex.repHigh} you'll move up.` };
 }
 
+// Coach lines in three tones. {n} style placeholders are filled by say().
+const VIBES = {
+  hype: {
+    trainedToday: 'Workout DONE today! Now recover like a champ: sleep and protein.',
+    never: 'Day one energy! Pick a routine in Train and let\'s go.',
+    longBreak: '{n} days off? Time to get back in there. Even 20 minutes counts!',
+    rested: 'You\'re rested and ready. Today is a training day!',
+    noSteps: 'No steps yet today. Run the RenStep Steps shortcut and tap Paste steps!',
+    goalHit: 'Step goal SMASHED: {steps} steps!',
+    evening: '{left} steps to go. Quick 15-minute walk and it\'s yours!',
+    toGo: '{left} steps to go. You\'ve got this!',
+    streak: '{n}-day streak on the line. Keep it alive today!',
+    week: '{done}/{target} workouts this week.',
+    weekDone: 'Weekly target hit: {done}/{target}! Anything extra is a bonus.',
+    doneNormal: 'Another one in the bank! Next session\'s targets are already updated.',
+    donePR: 'NEW PERSONAL BESTS! Targets for next time are updated. You\'re getting stronger!',
+  },
+  gentle: {
+    trainedToday: 'You trained today. Be kind to yourself tonight: rest, water and a good meal.',
+    never: 'Whenever you\'re ready, pick a routine in Train. We\'ll start easy.',
+    longBreak: 'It\'s been {n} days, and that\'s okay. A short, easy session is a lovely way back.',
+    rested: 'You\'re well rested. A workout today would feel good.',
+    noSteps: 'No steps logged yet. When you have a moment, run the shortcut and paste them in.',
+    goalHit: 'You reached your step goal: {steps} steps. Lovely.',
+    evening: '{left} steps left. A relaxed evening walk would do it.',
+    toGo: '{left} steps to go today. One step at a time.',
+    streak: 'You\'re on a {n}-day streak. A little movement today keeps it going.',
+    week: '{done} of {target} workouts this week.',
+    weekDone: 'You\'ve done your {target} workouts this week. Rest is progress too.',
+    doneNormal: 'Well done. Your next targets are updated, so you can just show up.',
+    donePR: 'You set new personal bests today. Your next targets are ready.',
+  },
+  sassy: {
+    trainedToday: 'Workout done. Now go eat something with protein in it, I\'m watching.',
+    never: 'The routines aren\'t going to do themselves. Train tab. Now. 💅',
+    longBreak: '{n} days?? The weights miss you. Don\'t make them beg.',
+    rested: 'You\'re rested. No excuses today, babe.',
+    noSteps: 'Zero steps logged. Either you\'re a statue or you forgot the shortcut.',
+    goalHit: '{steps} steps. Main character behaviour.',
+    evening: '{left} steps short. Put your shoes on, it\'s one walk.',
+    toGo: '{left} steps to go. The couch can wait.',
+    streak: '{n}-day streak. Break it and I\'ll be very dramatic about it.',
+    week: '{done}/{target} workouts this week. Do the maths.',
+    weekDone: '{done}/{target} this week. Okay, showing off now.',
+    doneNormal: 'Done and dusted. Next targets updated, try to keep up 😌',
+    donePR: 'New PRs?? Who said you could be this strong. Targets updated.',
+  },
+};
+function say(key, vars = {}) {
+  const t = (VIBES[data.settings.vibe] || VIBES.hype)[key] || VIBES.hype[key] || '';
+  return t.replace(/\{(\w+)\}/g, (_, k) => (vars[k] != null ? String(vars[k]) : ''));
+}
+
+function startOfWeekKey() {
+  const d = new Date();
+  const dow = (d.getDay() + 6) % 7; // Monday = 0
+  d.setDate(d.getDate() - dow);
+  return keyOf(d);
+}
+function workoutsThisWeek() {
+  const from = startOfWeekKey();
+  return data.sessions.filter((s) => s.kind !== 'cardio' && keyOf(new Date(s.date)) >= from).length;
+}
+
 function dailyTip() {
   const now = new Date();
   const today = todayKey();
@@ -414,15 +493,15 @@ function dailyTip() {
   const daysSince = last ? Math.floor((dateOfKey(today) - dateOfKey(keyOf(new Date(last.date)))) / DAY_MS) : null;
   const streak = currentStreak();
   const tips = [];
-  if (daysSince === 0) tips.push('Workout done today. Recovery is where you get stronger: aim for 7+ hours of sleep and protein with every meal.');
-  else if (daysSince === null) tips.push('Start with one of the ready-made routines in Train. I\'ll set your targets from there.');
-  else if (daysSince >= 4) tips.push(`It's been ${daysSince} days since your last workout. A short session today beats a perfect one next week.`);
-  else if (daysSince >= 2) tips.push('You\'re rested. Today is a good day to train.');
-  if (steps == null) tips.push('No steps logged today yet. Run your RenStep Steps shortcut, then tap Paste steps.');
-  else if (steps >= goal) tips.push(`Step goal smashed: ${fmtInt(steps)} steps.`);
-  else if (now.getHours() >= 17) tips.push(`You're ${fmtInt(goal - steps)} steps short. A brisk 15-minute walk covers about 1,800.`);
-  else tips.push(`${fmtInt(goal - steps)} steps to go today.`);
-  if (streak >= 3 && !isActiveDay(today, workoutDayKeys())) tips.push(`Keep your ${streak}-day streak alive: hit your step goal or log a workout today.`);
+  if (daysSince === 0) tips.push(say('trainedToday'));
+  else if (daysSince === null) tips.push(say('never'));
+  else if (daysSince >= 4) tips.push(say('longBreak', { n: daysSince }));
+  else if (daysSince >= 2) tips.push(say('rested'));
+  if (steps == null) tips.push(say('noSteps'));
+  else if (steps >= goal) tips.push(say('goalHit', { steps: fmtInt(steps) }));
+  else if (now.getHours() >= 17) tips.push(say('evening', { left: fmtInt(goal - steps) }));
+  else tips.push(say('toGo', { left: fmtInt(goal - steps) }));
+  if (streak >= 3 && !isActiveDay(today, workoutDayKeys())) tips.push(say('streak', { n: streak }));
   return tips.slice(0, 2).join(' ');
 }
 
@@ -551,13 +630,20 @@ function viewToday() {
           h('div', { class: 'paste-cta' },
             h('button', { class: 'btn primary sm', onclick: pasteSteps }, '📋 Paste steps'),
             h('button', { class: 'btn sm', onclick: () => openStepsSheet() }, 'Type'))))),
+    !data.plan ? h('div', { class: 'card' },
+      h('div', { class: 'row between' },
+        h('div', null, h('strong', null, 'Get your own plan'), h('div', { class: 'small muted' }, '5 quick taps, no typing')),
+        h('button', { class: 'btn primary sm', onclick: openPlanQuiz }, 'Start'))) : null,
     h('div', { class: 'card coach' },
       h('div', { class: 'who' }, 'Coach'),
       h('div', null, dailyTip())),
     levelCard(t, streak),
     nr && !data.activeWorkout ? h('div', { class: 'card' },
       h('div', { class: 'row between' },
-        h('div', null, h('div', { class: 'small muted' }, 'Up next'), h('strong', null, nr.name)),
+        h('div', null, h('div', { class: 'small muted' }, 'Up next'), h('strong', null, nr.name),
+          h('div', { class: 'small muted' }, workoutsThisWeek() >= data.settings.daysPerWeek
+            ? say('weekDone', { done: workoutsThisWeek(), target: data.settings.daysPerWeek })
+            : say('week', { done: workoutsThisWeek(), target: data.settings.daysPerWeek }))),
         h('div', { class: 'row' },
           h('button', { class: 'btn sm', onclick: openQuickLog }, '⚡ Quick log'),
           h('button', { class: 'btn primary sm', onclick: () => startWorkout(nr.id) }, 'Start')))) : null,
@@ -586,6 +672,7 @@ function viewRoutines() {
           h('div', { class: 'small muted' }, `${r.exercises.length} exercise${r.exercises.length === 1 ? '' : 's'}`)),
         h('span', { class: 'chev' }, '›')))) : h('div', { class: 'empty' }, 'No routines yet.'),
     h('div', { class: 'stack' },
+      h('button', { class: 'btn primary block', onclick: openPlanQuiz }, data.plan ? '✨ Redo my plan' : '✨ Build my plan (1 min)'),
       h('button', { class: 'btn block', onclick: () => openRoutineEditor(null) }, '+ New routine'),
       h('button', { class: 'btn block', onclick: openQuickLog }, '⚡ Quick log a walk, run or class')),
   );
@@ -718,6 +805,7 @@ function finishWorkout() {
   save();
   const after = totals();
   const newBadges = syncBadges();
+  const notes = takeNotes(newBadges.map((b) => b.id));
   ui.routineId = null;
   render();
   openSheet('Workout complete', () => h('div', { class: 'stack' },
@@ -728,7 +816,8 @@ function finishWorkout() {
     prs.length ? h('div', { class: 'card' }, h('h2', null, `Personal records (+${prs.length * XP_PER_PR} XP)`), prs.map((p) => h('div', null, `📈 ${p}`))) : null,
     newBadges.length ? h('div', { class: 'card' }, h('h2', null, 'New badges'), newBadges.map((b) => h('div', null, `${b.icon} ${b.name}`))) : null,
     h('div', { class: 'card coach' }, h('div', { class: 'who' }, 'Coach'), h('div', null,
-      prs.length ? 'New bests today. Your targets for next time are already updated.' : 'Solid work. Next session\'s targets are updated from what you just did.')),
+      prs.length ? say('donePR') : say('doneNormal'))),
+    notes.map(noteCard),
   ));
 }
 
@@ -756,6 +845,7 @@ function openQuickLog() {
       const lvl = totals().level;
       toast(`${st.activity} logged: +${xp} XP${lvl > before.level ? ` · Level ${lvl}! 🎉` : ''}`, 3500);
       if (fresh.length) setTimeout(() => toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000), 3600);
+      showNotes(takeNotes(fresh.map((b) => b.id)));
     } }, `Log it (+${cardioXP(st.min)} XP)`),
   );
   const { rerender } = openSheet('Quick log', body);
@@ -829,6 +919,123 @@ function openRoutineEditor(routine) {
   const { rerender } = openSheet(routine ? 'Edit routine' : 'New routine', body);
 }
 
+// ---------- plan quiz ----------
+const GOALS = {
+  tone: { label: '✨ Tone up', reps: [10, 15], rest: 75, steps: 8000 },
+  strong: { label: '💪 Get stronger', reps: [5, 8], rest: 120, steps: 7500 },
+  lean: { label: '🔥 Lose fat', reps: [12, 15], rest: 60, steps: 10000 },
+  consistent: { label: '📅 Just be consistent', reps: [8, 12], rest: 90, steps: 7000 },
+};
+const PLAN_TEMPLATES = {
+  gym: [
+    ['Glutes & Legs', ['Hip Thrust', 'Goblet Squat', 'Romanian Deadlift', 'Hip Abduction', 'Walking Lunge', 'Calf Raise']],
+    ['Upper Body', ['Lat Pulldown', 'Dumbbell Shoulder Press', 'Seated Cable Row', 'Lateral Raise', 'Bicep Curl', 'Tricep Pushdown']],
+    ['Booty & Core', ['Bulgarian Split Squat', 'Hip Thrust', 'Cable Kickback', 'Leg Curl', 'Hanging Knee Raise', 'Russian Twist']],
+    ['Full Body', ['Leg Press', 'Dumbbell Row', 'Incline Dumbbell Press', 'Romanian Deadlift', 'Lateral Raise', 'Crunch']],
+  ],
+  home: [
+    ['Home Glutes & Legs', ['Glute Bridge', 'Bodyweight Squat', 'Walking Lunge', 'Bulgarian Split Squat', 'Calf Raise', 'Russian Twist']],
+    ['Home Upper & Core', ['Push-up', 'Pike Push-up', 'Crunch', 'Mountain Climber', 'Russian Twist', 'Hanging Knee Raise']],
+    ['Home Sweat', ['Burpee', 'Bodyweight Squat', 'Mountain Climber', 'Glute Bridge', 'Push-up', 'Crunch']],
+    ['Home Full Body', ['Bodyweight Squat', 'Push-up', 'Glute Bridge', 'Walking Lunge', 'Pike Push-up', 'Crunch']],
+  ],
+};
+const ALL_LIB = Object.values(LIBRARY).flat();
+
+function buildPlan(plan) {
+  const g = GOALS[plan.goal];
+  const count = plan.days <= 2 ? 2 : Math.min(plan.days, 4);
+  const perRoutine = { 20: 3, 30: 4, 45: 5, 60: 6 }[plan.minutes] || 5;
+  let templates = PLAN_TEMPLATES[plan.place];
+  if (count === 2) templates = [templates[3], templates[0]].map((t, i) => [i ? t[0] : t[0], t[1]]);
+  return templates.slice(0, count).map(([name, list]) => ({
+    id: uid(), name, generated: true,
+    exercises: list.slice(0, perRoutine).map((exName) => {
+      const row = ALL_LIB.find((r) => r[0] === exName) || [exName, 3, 8, 12, 0, 0];
+      const ex = libEx(row);
+      if (plan.place === 'home') { ex.startWeight = 0; ex.increment = 0; }
+      if (ex.increment > 0) { ex.repLow = g.reps[0]; ex.repHigh = g.reps[1]; }
+      if (plan.goal === 'strong' && plan.minutes >= 45 && ex.increment > 0) ex.sets = 4;
+      return ex;
+    }),
+  }));
+}
+
+function openPlanQuiz() {
+  const st = { i: 0, goal: data.plan ? data.plan.goal : null, days: data.plan ? data.plan.days : null, place: data.plan ? data.plan.place : null, minutes: data.plan ? data.plan.minutes : null, vibe: data.settings.vibe };
+  const Q = [
+    ['What\'s the main goal?', 'goal', Object.entries(GOALS).map(([k, v]) => [k, v.label])],
+    ['How many days a week can you train?', 'days', [[2, '2 days'], [3, '3 days'], [4, '4 days'], [5, '5+ days']]],
+    ['Where do you work out?', 'place', [['gym', '🏋️ Gym'], ['home', '🏠 Home, no equipment']]],
+    ['How long per session?', 'minutes', [[20, '20 min'], [30, '30 min'], [45, '45 min'], [60, '1 hour']]],
+    ['Pick your coach vibe', 'vibe', [['hype', '📣 Hype me up'], ['gentle', '🌸 Keep it gentle'], ['sassy', '💅 Sassy']]],
+  ];
+  const finish = () => {
+    const plan = { goal: st.goal, days: st.days, place: st.place, minutes: st.minutes };
+    const g = GOALS[plan.goal];
+    const custom = data.routines.filter((r) => !r.generated);
+    data.routines = [...buildPlan(plan), ...custom];
+    data.plan = plan;
+    data.settings.vibe = st.vibe;
+    data.settings.daysPerWeek = plan.days;
+    data.settings.restSec = g.rest;
+    data.settings.manualGoal = g.steps;
+    data.seeded = true;
+    save();
+    closeSheet();
+    go('train');
+    toast(`Your plan is ready: ${data.routines.filter((r) => r.generated).length} routines 💗`, 3500);
+    showNotes(takeNotes(['welcome']));
+  };
+  const body = () => {
+    const [q, key, opts] = Q[st.i];
+    return h('div', { class: 'stack' },
+      h('div', { class: 'small muted' }, `Question ${st.i + 1} of ${Q.length}`),
+      h('h2', null, q),
+      h('div', { class: 'stack' }, opts.map(([v, label]) => h('button', {
+        class: st[key] === v ? 'btn primary block' : 'btn block',
+        onclick: () => { st[key] = v; if (st.i < Q.length - 1) { st.i++; rerender(); } else finish(); },
+      }, label))),
+      st.i > 0 ? h('button', { class: 'btn sm', onclick: () => { st.i--; rerender(); } }, '‹ Back') : null,
+      st.i === 0 ? h('div', { class: 'small muted' }, 'This builds your routines, step goal and rest timer. Your own routines are kept. You can redo it any time in Settings.') : null,
+    );
+  };
+  const { rerender } = openSheet('Build my plan', body);
+}
+
+// ---------- secret notes ----------
+function notesConfig() {
+  const cfg = window.RENSTEP_NOTES;
+  const out = { from: 'A friend', notes: {} };
+  if (!cfg || typeof cfg !== 'object') return out;
+  out.from = str(cfg.from, 40, out.from) || out.from;
+  if (cfg.notes && typeof cfg.notes === 'object') {
+    for (const [k, v] of Object.entries(cfg.notes)) if (typeof v === 'string' && v.trim()) out.notes[k] = v.trim().slice(0, 500);
+  }
+  return out;
+}
+const NOTE_LABELS = { welcome: 'Your first plan' };
+function noteLabel(id) { const b = BADGES.find((x) => x.id === id); return NOTE_LABELS[id] || (b ? `${b.icon} ${b.name}` : id); }
+// Returns notes for these milestone ids that haven't been shown yet, and marks them shown.
+function takeNotes(ids) {
+  const { notes } = notesConfig();
+  const fresh = ids.filter((id) => notes[id] && !data.notesSeen.includes(id));
+  if (!fresh.length) return [];
+  data.notesSeen.push(...fresh);
+  save();
+  return fresh.map((id) => ({ id, text: notes[id] }));
+}
+function noteCard(n) {
+  return h('div', { class: 'card note' },
+    h('div', { class: 'who' }, `💌 ${noteLabel(n.id)}`),
+    h('div', { class: 'note-text' }, n.text),
+    h('div', { class: 'small muted' }, `— ${notesConfig().from}`));
+}
+function showNotes(list) {
+  if (!list.length) return;
+  setTimeout(() => openSheet(`A note from ${notesConfig().from} 💌`, () => h('div', { class: 'stack' }, list.map(noteCard))), 400);
+}
+
 // ---------- steps entry ----------
 function parseStepsText(text) {
   // Accepts the Shortcut output like "RENSTEP 2026-11-02 8 432" or just a number.
@@ -854,6 +1061,7 @@ function recordSteps(date, steps) {
   render();
   toast(`${fmtInt(steps)} steps saved for ${date === todayKey() ? 'today' : fmtDate(dateOfKey(date).toISOString())}${prev != null && prev !== steps ? ` (was ${fmtInt(prev)})` : ''}`);
   if (fresh.length) setTimeout(() => toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000), 2700);
+  showNotes(takeNotes(fresh.map((b) => b.id)));
 }
 
 async function pasteSteps() {
@@ -951,6 +1159,16 @@ function viewRewards() {
       return h('div', { class: got ? 'badge' : 'badge locked', 'aria-label': `${b.name}: ${got ? 'unlocked' : 'locked'}. ${b.how}` },
         h('div', { class: 'icon' }, b.icon), h('div', { class: 'name' }, b.name), h('div', { class: 'how' }, b.how));
     })),
+    (() => {
+      const { notes, from } = notesConfig();
+      const ids = Object.keys(notes);
+      if (!ids.length) return null;
+      const seen = ids.filter((id) => data.notesSeen.includes(id));
+      return h('div', null,
+        h('div', { class: 'section-label' }, `Notes from ${from} · ${seen.length}/${ids.length}`),
+        seen.map((id) => noteCard({ id, text: notes[id] })),
+        seen.length < ids.length ? h('div', { class: 'card small muted center' }, `🔒 ${ids.length - seen.length} more hidden. Keep going to unlock them.`) : null);
+    })(),
     h('div', { class: 'card small muted' },
       h('strong', null, 'How XP works'), h('br'),
       `Workout: ${WORKOUT_BASE_XP} XP + ${XP_PER_SET} per set + ${XP_PER_PR} per personal record. `,
@@ -967,7 +1185,13 @@ function openSettings() {
       h('h2', null, 'You'),
       h('label', { class: 'field' }, 'Your name',
         h('input', { type: 'text', value: data.settings.name, maxlength: 30, autocomplete: 'given-name',
-          onchange: (ev) => { data.settings.name = str(ev.target.value, 30); save(); render(); } }))),
+          onchange: (ev) => { data.settings.name = str(ev.target.value, 30); save(); render(); } })),
+      h('label', { class: 'field' }, 'Coach vibe',
+        h('select', { onchange: (ev) => { data.settings.vibe = ev.target.value; save(); render(); } },
+          [['hype', '📣 Hype me up'], ['gentle', '🌸 Gentle'], ['sassy', '💅 Sassy']].map(([v, l]) => h('option', { value: v, selected: data.settings.vibe === v }, l)))),
+      h('label', { class: 'field' }, 'Workouts per week target',
+        stepper(data.settings.daysPerWeek, 'workouts per week', 'numeric', 1, 1, 7, (v) => { data.settings.daysPerWeek = v; save(); })),
+      h('button', { class: 'btn block', onclick: () => { closeSheet(); openPlanQuiz(); } }, data.plan ? '✨ Redo my plan quiz' : '✨ Build my plan')),
     h('div', { class: 'card stack' },
       h('h2', null, 'Step goal'),
       h('label', { class: 'field' }, 'Goal type',
@@ -1102,10 +1326,11 @@ function boot() {
     openSheet('Welcome to RenStep 💗', () => h('div', { class: 'stack' },
       h('div', null, 'Steps, workouts and a coach that plans your next session for you. What should I call you?'),
       h('input', { type: 'text', maxlength: 30, placeholder: 'Your name', autocomplete: 'given-name', oninput: (ev) => { st.name = ev.target.value; } }),
-      h('button', { class: 'btn primary block', onclick: () => { data.settings.name = str(st.name, 30); save(); closeSheet(); render(); } }, "Let's go")));
+      h('button', { class: 'btn primary block', onclick: () => { data.settings.name = str(st.name, 30); save(); render(); openPlanQuiz(); } }, "Let's go")));
   }
   const fresh = syncBadges();
   if (fresh.length) toast(`Badge unlocked: ${fresh.map((b) => `${b.icon} ${b.name}`).join(', ')}`, 4000);
+  if (data.askedName && !sheetState) showNotes(takeNotes(fresh.map((b) => b.id)));
 }
 
 boot();
